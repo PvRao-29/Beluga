@@ -1,0 +1,16 @@
+[package]
+name = "beluga-tune"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Tuning helpers (texel / SPSA) for Beluga evaluation."
+
+[[bin]]
+name = "beluga-tune"
+path = "src/main.rs"
+
+[dependencies]
+beluga-core = { workspace = true }

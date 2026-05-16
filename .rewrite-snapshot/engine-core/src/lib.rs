@@ -1,0 +1,27 @@
+//! Beluga chess engine core library.
+//!
+//! Modules are layered bottom-up: `types`/`bitboard` → `attacks`/`zobrist` →
+//! `position`/`movegen` → `eval`/`tt`/`search`. See `docs/ARCHITECTURE.md`.
+
+pub mod attacks;
+pub mod bitboard;
+pub mod chess_move;
+pub mod eval;
+pub mod movegen;
+pub mod nnue;
+pub mod perft;
+pub mod position;
+pub mod search;
+pub mod see;
+pub mod timeman;
+pub mod tt;
+pub mod types;
+pub mod zobrist;
+
+pub use bitboard::Bitboard;
+pub use chess_move::{Move, MoveFlag, MoveList};
+pub use position::{Position, START_FEN};
+pub use search::{Search, MATE};
+pub use timeman::Limits;
+pub use tt::Tt;
+pub use types::{CastlingRights, Color, Piece, PieceType, Square};
