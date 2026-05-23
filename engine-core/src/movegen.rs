@@ -266,15 +266,20 @@ fn gen_pawns(
         let on_promo_rank = from.rank() == promo_rank;
 
         // Pushes (quiet, or promotions even in capture-gen because they are noisy).
+        // The intermediate square only needs to be empty for the pawn to pass
+        // through; the destination must satisfy the check/pin masks. The double
+        // push is considered independently of whether the single push is a legal
+        // target (e.g. a double push can block a check the single push cannot).
         let one = Square((from.0 as i32 + up) as u8);
         if empties.contains(one) {
-            let one_ok = targets.contains(one) && pinray.contains(one);
             if on_promo_rank {
-                if one_ok {
+                if targets.contains(one) && pinray.contains(one) {
                     add_promotions(list, from, one, false);
                 }
-            } else if quiets && one_ok {
-                list.push(Move::from_raw_flag(from, one, F_QUIET));
+            } else if quiets {
+                if targets.contains(one) && pinray.contains(one) {
+                    list.push(Move::from_raw_flag(from, one, F_QUIET));
+                }
                 if from.rank() == start_rank {
                     let two = Square((from.0 as i32 + 2 * up) as u8);
                     if empties.contains(two) && targets.contains(two) && pinray.contains(two) {
