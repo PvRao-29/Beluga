@@ -1,10 +1,14 @@
 //! Beluga chess engine core library.
+//!
+//! Modules are layered bottom-up: `types`/`bitboard` → `attacks`/`zobrist` →
+//! `position`/`movegen` → `eval`/`tt`/`search`. See `docs/ARCHITECTURE.md`.
 
 pub mod attacks;
 pub mod bitboard;
 pub mod chess_move;
 pub mod eval;
 pub mod movegen;
+pub mod nnue;
 pub mod perft;
 pub mod position;
 pub mod search;
