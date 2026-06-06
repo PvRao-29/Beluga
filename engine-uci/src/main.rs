@@ -22,6 +22,7 @@ const AUTHORS: &str = "Beluga authors";
 const DEFAULT_HASH_MB: usize = 16;
 const MIN_HASH_MB: usize = 1;
 const MAX_HASH_MB: usize = 65536;
+const DEFAULT_MOVE_OVERHEAD_MS: u64 = 30;
 
 struct Engine {
     pos: Position,
@@ -30,6 +31,7 @@ struct Engine {
     worker: Option<JoinHandle<()>>,
     hash_mb: usize,
     threads: usize,
+    move_overhead_ms: u64,
 }
 
 impl Engine {
@@ -42,6 +44,7 @@ impl Engine {
             worker: None,
             hash_mb: DEFAULT_HASH_MB,
             threads: 1,
+            move_overhead_ms: DEFAULT_MOVE_OVERHEAD_MS,
         }
     }
 
@@ -89,7 +92,7 @@ impl Engine {
         );
         println!("option name Threads type spin default 1 min 1 max 256");
         println!("option name Clear Hash type button");
-        println!("option name Move Overhead type spin default 30 min 0 max 5000");
+        println!("option name Move Overhead type spin default {DEFAULT_MOVE_OVERHEAD_MS} min 0 max 5000");
         println!("uciok");
     }
 
@@ -127,6 +130,11 @@ impl Engine {
             "clear hash" => {
                 self.join_worker();
                 self.tt.clear();
+            }
+            "move overhead" => {
+                if let Ok(ms) = value.parse::<u64>() {
+                    self.move_overhead_ms = ms.clamp(0, 5000);
+                }
             }
             _ => {}
         }
@@ -171,7 +179,8 @@ impl Engine {
 
     fn cmd_go(&mut self, line: &str) {
         self.join_worker();
-        let limits = parse_go(line);
+        let mut limits = parse_go(line);
+        limits.move_overhead_ms = self.move_overhead_ms;
 
         self.stop.store(false, Ordering::Relaxed);
         let main_pos = self.pos.clone();
@@ -231,7 +240,7 @@ impl Engine {
             .next()
             .and_then(|s| s.parse().ok())
             .unwrap_or(BENCH_DEPTH);
-        run_bench(depth, self.hash_mb);
+        run_bench(depth, self.hash_mb, self.move_overhead_ms);
     }
 }
 
@@ -329,7 +338,7 @@ const BENCH_FENS: &[&str] = &[
     "r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/3P1N2/PPP2PPP/RNBQK2R w KQkq - 0 1",
 ];
 
-fn run_bench(depth: u32, hash_mb: usize) {
+fn run_bench(depth: u32, hash_mb: usize, move_overhead_ms: u64) {
     beluga_core::attacks::init();
     let tt = Tt::new(hash_mb);
     let stop = Arc::new(AtomicBool::new(false));
@@ -341,6 +350,7 @@ fn run_bench(depth: u32, hash_mb: usize) {
         let mut pos = Position::from_fen(fen).expect("valid bench fen");
         let limits = Limits {
             depth: Some(depth),
+            move_overhead_ms,
             ..Default::default()
         };
         let mut search = Search::new(&mut pos, &tt, Arc::clone(&stop), limits);
@@ -378,7 +388,7 @@ fn main() {
             .get(1)
             .and_then(|s| s.parse().ok())
             .unwrap_or(BENCH_DEPTH);
-        run_bench(depth, DEFAULT_HASH_MB);
+        run_bench(depth, DEFAULT_HASH_MB, DEFAULT_MOVE_OVERHEAD_MS);
         return;
     }
 
