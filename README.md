@@ -122,9 +122,30 @@ Lazy SMP with a shared transposition table. The main thread reports search info;
 | `scripts/selfplay.sh` | cutechess-cli match vs another engine |
 | `scripts/sprt.sh` | SPRT comparison between two builds |
 | `scripts/run_tests.sh` | fmt, clippy, tests, perft smoke, bench |
+| `scripts/gui.sh` | Build Beluga, install En Croissant, register engine, launch GUI |
+| `scripts/setup_en_croissant.sh` | Download En Croissant into `.local/` |
+| `scripts/register_beluga_engine.py` | Add/update Beluga in En Croissant `engines.json` |
 | `.local/bin/cutechess-cli` | Static macOS arm64 binary (optional) |
+| `.local/en-croissant.app` | En Croissant GUI (downloaded, gitignored) |
 
 Match scripts need `cutechess-cli` on `PATH` (see `.local/bin/` or build from [cutechess](https://github.com/cutechess/cutechess)).
+
+### GUI (En Croissant)
+
+Beluga has no built-in board UI. For interactive play and analysis, use [En Croissant](https://github.com/franciscoBSalgueiro/en-croissant):
+
+```bash
+./scripts/gui.sh
+```
+
+This builds `target/release/beluga`, downloads En Croissant v0.15.0 into `.local/`, registers Beluga in En Croissant’s engine list, and opens the app. Re-run after rebuilding the engine to refresh the binary path and version.
+
+Options:
+
+```bash
+./scripts/gui.sh --no-build      # skip cargo build
+./scripts/gui.sh --setup-only    # install + register, do not launch
+```
 
 ---
 
