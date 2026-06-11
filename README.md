@@ -184,7 +184,6 @@ Perft uses bulk counting at depth 1, so perft nps is not comparable to search np
 - [`docs/DESIGN.md`](docs/DESIGN.md)
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 - [`docs/TUNING.md`](docs/TUNING.md)
-- [`docs/ROADMAP.md`](docs/ROADMAP.md)
 - [`docs/SELF_CRITIQUE.md`](docs/SELF_CRITIQUE.md)
 
 ---
@@ -192,7 +191,9 @@ Perft uses bulk counting at depth 1, so perft nps is not comparable to search np
 
 ## Acknowledgements
 
-The chess programming community has provided invaluable resources that made this project possible:
+I would like to thank my friend [Andy Xia](https://github.com/Andrew-Y-Xia) for inspiring me to embark on this journey.
+
+I would also like to thank the chess programming community that has provided invaluable resources that made this project possible:
 
 - The [Chess Programming Wiki](https://www.chessprogramming.org/) for comprehensive technical documentation on search algorithms, move generation, and evaluation techniques
 - [Stockfish](https://stockfishchess.org) and [Crafty](https://craftychess.com) for demonstrating advanced engine architecture and optimization techniques
@@ -224,5 +225,3 @@ The chess programming community has provided invaluable resources that made this
 - Ponder support
 - Criterion micro-benchmarks; miri/sanitizer CI jobs
 - Formal strength testing: large SPRT gauntlets, calibrated opponent pool
-
-See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full list.
