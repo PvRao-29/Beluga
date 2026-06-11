@@ -29,9 +29,7 @@ scripts/rewrite_history.py
 .claude/
 
 # Local GUI (downloaded by scripts/setup_en_croissant.sh)
-.local/en-croissant.app/
-.local/en-croissant.AppImage
-.local/en-croissant
+.local
 
 # Games
 games/

@@ -1,8 +1,0 @@
-En Croissant 0.15.0
-Installed by scripts/setup_en_croissant.sh
-
-macOS app: .local/en-croissant.app
-Linux app: .local/en-croissant.AppImage
-
-Upstream: https://github.com/franciscoBSalgueiro/en-croissant
-License: GPL-3.0-only
