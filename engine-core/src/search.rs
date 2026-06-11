@@ -121,6 +121,10 @@ pub struct Search<'a> {
 
     root_best: Move,
     root_score: i32,
+    /// Nodes spent under each root move (indexed from/to), cumulative over
+    /// the whole search. The best move's share measures decision "effort":
+    /// a dominant share means an easy move that needs less of the budget.
+    root_nodes: Box<[[u64; 64]; 64]>,
 
     /// Called once per completed depth with progress info.
     on_info: Option<InfoCallback<'a>>,
@@ -136,7 +140,8 @@ impl<'a> Search<'a> {
         limits: Limits,
     ) -> Search<'a> {
         let stm = pos.side_to_move();
-        let tm = TimeManager::new(&limits, stm);
+        let fullmove = pos.fullmove_number() as u32;
+        let tm = TimeManager::new(&limits, stm, fullmove);
         let mut lmr = [[0i32; 64]; 64];
         for (d, row) in lmr.iter_mut().enumerate().skip(1) {
             for (m, slot) in row.iter_mut().enumerate().skip(1) {
@@ -166,6 +171,7 @@ impl<'a> Search<'a> {
             nmp_min_ply: 0,
             root_best: Move::NULL,
             root_score: 0,
+            root_nodes: Box::new([[0; 64]; 64]),
             on_info: None,
         }
     }
@@ -194,6 +200,7 @@ impl<'a> Search<'a> {
             return Move::NULL;
         }
         let mut best_move = fallback.get(0);
+        let single_reply = fallback.len() == 1;
 
         let max_depth = self
             .limits
@@ -209,6 +216,7 @@ impl<'a> Search<'a> {
             if self.stopped {
                 break;
             }
+            let prev_score = last_score;
             last_score = score;
             let prev_best = best_move;
             best_move = self.pv_table[0][0];
@@ -217,23 +225,42 @@ impl<'a> Search<'a> {
 
             self.report(depth, score);
 
-            // Soft time (scaled by best-move stability and root fail-lows)
-            // and mate-found early exit.
+            // A forced move needs no deepening on a clock: bank the time.
+            if single_reply && self.tm.has_clock() {
+                break;
+            }
+
+            // Soft-limit budget scaling. Four signals adjust how much of the
+            // soft budget this move may spend:
+            // * best-move stability across iterations (stable → spend less),
+            // * the best move's share of all nodes (a dominant share means
+            //   the decision is easy → spend less; a contested root → more),
+            // * a score that fell since the previous iteration (→ more),
+            // * a root aspiration fail-low this iteration (→ more).
             if best_move == prev_best {
-                stability = (stability + 1).min(4);
+                stability = (stability + 1).min(8);
             } else {
                 stability = 0;
             }
-            let mut budget_pct: u64 = match stability {
-                0 => 130,
-                1 => 115,
-                2 => 100,
-                3 => 90,
-                _ => 80,
-            };
-            if self.iter_fail_low {
-                budget_pct += 40;
+            const STABILITY_PCT: [u64; 9] = [140, 120, 110, 100, 95, 90, 85, 82, 80];
+            let mut budget_pct = STABILITY_PCT[stability as usize];
+
+            if depth >= 8 && self.nodes > 0 {
+                let bn = self.root_nodes[best_move.from().index()][best_move.to().index()];
+                let effort_pct = (100 * bn / self.nodes).min(100);
+                let node_pct = (130 - effort_pct * 6 / 10).clamp(75, 130);
+                budget_pct = budget_pct * node_pct / 100;
             }
+
+            if depth >= 6 && score < prev_score {
+                let drop = ((prev_score - score) as u64).min(50);
+                budget_pct = budget_pct * (100 + drop) / 100;
+            }
+            if self.iter_fail_low {
+                budget_pct = budget_pct * 130 / 100;
+            }
+            budget_pct = budget_pct.clamp(40, 300);
+
             if self.tm.soft_expired_scaled(budget_pct) {
                 break;
             }
@@ -582,6 +609,7 @@ impl<'a> Search<'a> {
             self.stack[ply as usize].current_move = m;
             self.stack[ply as usize].moved_piece = moving_piece;
 
+            let nodes_before = self.nodes;
             self.pos.make_move(m);
             let gives_check = self.pos.in_check();
             let ext = i32::from(gives_check).max(sing_ext);
@@ -613,6 +641,10 @@ impl<'a> Search<'a> {
             }
 
             self.pos.unmake_move(m);
+
+            if root {
+                self.root_nodes[m.from().index()][m.to().index()] += self.nodes - nodes_before;
+            }
 
             if self.stopped {
                 return 0;

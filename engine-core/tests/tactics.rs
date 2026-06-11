@@ -56,6 +56,28 @@ fn wins_hanging_queen() {
 }
 
 #[test]
+fn single_legal_reply_moves_instantly() {
+    // White is in check and capturing the queen is the only legal move. On a
+    // clock the engine should answer immediately instead of burning budget.
+    beluga_core::attacks::init();
+    let tt = Tt::new(16);
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut pos = Position::from_fen("k7/8/8/8/8/8/6q1/7K w - - 0 1").expect("valid fen");
+    let limits = Limits {
+        movetime: Some(5_000),
+        ..Default::default()
+    };
+    let mut s = Search::new(&mut pos, &tt, stop, limits);
+    let start = std::time::Instant::now();
+    let m = s.think();
+    assert_eq!(m.to_uci(), "h1g2", "only legal move");
+    assert!(
+        start.elapsed().as_millis() < 1_000,
+        "forced move should not consume the time budget"
+    );
+}
+
+#[test]
 fn see_free_pawn_is_positive() {
     let pos = Position::from_fen("4k3/8/8/3p4/4P3/8/8/4K3 w - - 0 1").unwrap();
     let m = pos.parse_uci_move("e4d5").unwrap();

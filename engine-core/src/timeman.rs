@@ -46,7 +46,9 @@ pub struct TimeManager {
 }
 
 impl TimeManager {
-    pub fn new(limits: &Limits, stm: Color) -> TimeManager {
+    /// `fullmove` is the game's fullmove number; sudden-death allocation uses
+    /// it to model how many moves are still ahead.
+    pub fn new(limits: &Limits, stm: Color, fullmove: u32) -> TimeManager {
         let start = Instant::now();
 
         if limits.infinite
@@ -80,16 +82,22 @@ impl TimeManager {
         let total = time.saturating_sub(overhead);
         let (soft, hard) = match limits.movestogo {
             Some(mtg) => {
-                let mtg = mtg.max(1) as u64;
+                // Cap mtg so a distant time control doesn't starve every move,
+                // and keep a cushion so the moves just before the control are
+                // never played on an empty clock.
+                let mtg = (mtg.max(1) as u64).min(40);
                 let soft = (total / mtg + inc * 3 / 4).min(total * 8 / 10).max(1);
                 let hard = ((soft * 4).min(total * 8 / 10)).max(soft);
                 (soft, hard)
             }
             None => {
-                // Sudden death / increment: budget about 1/20 of the clock
-                // plus most of the increment, with a wider hard ceiling so
+                // Sudden death / increment: model the remaining game length
+                // from the move number — long horizon in the opening (bank
+                // time while moves are easy), shorter from the middlegame on
+                // where decisions are hardest. The hard ceiling stays wide so
                 // critical moves (fail-lows, instability) can run long.
-                let soft = (total / 20 + inc * 3 / 4).min(total * 8 / 10).max(1);
+                let horizon = 55u64.saturating_sub(fullmove as u64 * 2).clamp(24, 50);
+                let soft = (total / horizon + inc * 3 / 4).min(total * 8 / 10).max(1);
                 let hard = ((soft * 5).min(total * 8 / 10)).max(soft);
                 (soft, hard)
             }
@@ -100,6 +108,12 @@ impl TimeManager {
             soft: Some(Duration::from_millis(soft)),
             hard: Some(Duration::from_millis(hard)),
         }
+    }
+
+    /// True when the search runs against a wall clock (movetime or game clock).
+    #[inline]
+    pub fn has_clock(&self) -> bool {
+        self.soft.is_some()
     }
 
     #[inline]
@@ -153,7 +167,7 @@ mod tests {
 
     #[test]
     fn budget_is_a_sane_fraction_of_the_clock() {
-        let tm = TimeManager::new(&limits(), Color::White);
+        let tm = TimeManager::new(&limits(), Color::White, 1);
         let soft = tm.soft.unwrap().as_millis() as u64;
         let hard = tm.hard.unwrap().as_millis() as u64;
         assert!(soft >= 1 && soft <= 60_000 * 8 / 10, "soft = {soft}");
@@ -165,10 +179,25 @@ mod tests {
         let mut l = limits();
         l.movestogo = Some(10);
         l.winc = Some(0);
-        let tm = TimeManager::new(&l, Color::White);
+        let tm = TimeManager::new(&l, Color::White, 1);
         let soft = tm.soft.unwrap().as_millis() as u64;
         // 60s - 30ms overhead over 10 moves ≈ 6s per move.
         assert!((5_000..=6_500).contains(&soft), "soft = {soft}");
+    }
+
+    #[test]
+    fn opening_moves_get_less_time_than_middlegame() {
+        let mut l = limits();
+        l.winc = Some(0);
+        let opening = TimeManager::new(&l, Color::White, 1);
+        let middlegame = TimeManager::new(&l, Color::White, 25);
+        let s_open = opening.soft.unwrap().as_millis() as u64;
+        let s_mid = middlegame.soft.unwrap().as_millis() as u64;
+        assert!(s_open < s_mid, "open = {s_open}, mid = {s_mid}");
+        // Horizon is clamped: very late moves are no greedier than move 25.
+        let late = TimeManager::new(&l, Color::White, 60);
+        let s_late = late.soft.unwrap().as_millis() as u64;
+        assert_eq!(s_mid, s_late);
     }
 
     #[test]
@@ -177,8 +206,19 @@ mod tests {
             depth: Some(10),
             ..Default::default()
         };
-        let tm = TimeManager::new(&l, Color::White);
+        let tm = TimeManager::new(&l, Color::White, 1);
         assert!(tm.soft.is_none() && tm.hard.is_none());
         assert!(!tm.soft_expired() && !tm.hard_expired());
+        assert!(!tm.has_clock());
+    }
+
+    #[test]
+    fn movetime_has_a_clock() {
+        let l = Limits {
+            movetime: Some(1_000),
+            ..Default::default()
+        };
+        let tm = TimeManager::new(&l, Color::White, 1);
+        assert!(tm.has_clock());
     }
 }
