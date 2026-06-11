@@ -35,6 +35,7 @@ scripts/rewrite_history.py
 
 # Games
 games/
+engines/
 
 # OS
 .DS_Store
