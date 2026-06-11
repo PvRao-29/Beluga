@@ -6,7 +6,7 @@ UCI chess engine written in Rust.
 
 Beluga is a bitboard chess engine in a Cargo workspace. The `engine-core` library holds the board, move generation, search, and evaluation; the `beluga` binary speaks UCI. It runs in Arena, Cutechess, and other standard GUIs.
 
-The search uses iterative deepening PVS with a transposition table, common pruning techniques, and Lazy SMP threading. Evaluation is a tapered handcrafted function built on PeSTO piece-square tables. Weights are not fully tuned yet. There is no formal rating on CCRL or similar lists.
+The search uses iterative deepening PVS with a transposition table, common pruning techniques, and Lazy SMP threading. Evaluation is a tapered handcrafted function built on PeSTO piece-square tables. Weights are not fully tuned yet.
 
 ---
 
