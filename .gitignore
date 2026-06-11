@@ -26,6 +26,7 @@ wheels/
 *.egg-info
 scripts/rewrite_history.py
 .rewrite-snapshot/
+.claude/
 
 # Local GUI (downloaded by scripts/setup_en_croissant.sh)
 .local/en-croissant.app/
