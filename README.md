@@ -1,6 +1,6 @@
 # Beluga
 
-## 2900 Elo based on local evaluations
+**2880 ± 40 Elo based on local evaluations**
 
 UCI chess engine written in Rust.
 
