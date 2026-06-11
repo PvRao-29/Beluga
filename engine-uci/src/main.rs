@@ -7,7 +7,7 @@
 use beluga_core::eval;
 use beluga_core::perft;
 use beluga_core::position::{Position, START_FEN};
-use beluga_core::search::{Search, SearchInfo, MATE, MATE_IN_MAX};
+use beluga_core::search::{Heuristics, Search, SearchInfo, MATE, MATE_IN_MAX};
 use beluga_core::timeman::Limits;
 use beluga_core::tt::Tt;
 use std::io::{self, BufRead, Write};
@@ -28,7 +28,10 @@ struct Engine {
     pos: Position,
     tt: Arc<Tt>,
     stop: Arc<AtomicBool>,
-    worker: Option<JoinHandle<()>>,
+    /// The manager thread returns the heuristic tables when it finishes so
+    /// killers/history persist across moves of the same game.
+    worker: Option<JoinHandle<Heuristics>>,
+    heur: Option<Heuristics>,
     hash_mb: usize,
     threads: usize,
     move_overhead_ms: u64,
@@ -42,6 +45,7 @@ impl Engine {
             tt: Arc::new(Tt::new(DEFAULT_HASH_MB)),
             stop: Arc::new(AtomicBool::new(false)),
             worker: None,
+            heur: None,
             hash_mb: DEFAULT_HASH_MB,
             threads: 1,
             move_overhead_ms: DEFAULT_MOVE_OVERHEAD_MS,
@@ -51,7 +55,9 @@ impl Engine {
     fn join_worker(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(h) = self.worker.take() {
-            let _ = h.join();
+            if let Ok(heur) = h.join() {
+                self.heur = Some(heur);
+            }
         }
     }
 
@@ -99,6 +105,7 @@ impl Engine {
     fn cmd_newgame(&mut self) {
         self.join_worker();
         self.tt.clear();
+        self.heur = None;
         self.pos = Position::startpos();
     }
 
@@ -187,6 +194,7 @@ impl Engine {
         let tt = Arc::clone(&self.tt);
         let stop = Arc::clone(&self.stop);
         let threads = self.threads;
+        let heur = self.heur.take();
 
         // The "manager" thread owns the main search (which reports and returns
         // the best move) and the Lazy-SMP helper threads. Helpers share the TT
@@ -208,6 +216,9 @@ impl Engine {
             let mut pos = main_pos;
             let tt_ref: &Tt = &tt;
             let mut search = Search::new(&mut pos, tt_ref, Arc::clone(&stop), limits);
+            if let Some(h) = heur {
+                search.set_heuristics(h);
+            }
             search.set_info_callback(Box::new(|info: &SearchInfo| {
                 print_info(info);
             }));
@@ -221,6 +232,7 @@ impl Engine {
 
             println!("bestmove {}", best.to_uci());
             io::stdout().flush().ok();
+            search.take_heuristics()
         }));
     }
 

@@ -17,6 +17,7 @@ struct Undo {
     ep_square: Option<Square>,
     halfmove: u16,
     key: u64,
+    pawn_key: u64,
 }
 
 #[derive(Clone)]
@@ -31,6 +32,8 @@ pub struct Position {
     halfmove: u16,
     fullmove: u16,
     key: u64,
+    /// Zobrist key over pawns only (for pawn-structure-keyed caches).
+    pawn_key: u64,
     history: Vec<Undo>,
     key_history: Vec<u64>,
     castle_mask: [u8; 64],
@@ -58,6 +61,7 @@ impl Position {
             halfmove: 0,
             fullmove: 1,
             key: 0,
+            pawn_key: 0,
             history: Vec::with_capacity(512),
             key_history: Vec::with_capacity(512),
             castle_mask,
@@ -78,6 +82,10 @@ impl Position {
     #[inline(always)]
     pub fn key(&self) -> u64 {
         self.key
+    }
+    #[inline(always)]
+    pub fn pawn_key(&self) -> u64 {
+        self.pawn_key
     }
     #[inline(always)]
     pub fn halfmove_clock(&self) -> u16 {
@@ -193,6 +201,9 @@ impl Position {
         self.occupied.set(sq);
         self.mailbox[sq.index()] = piece.0;
         self.key ^= zobrist::piece_key(piece, sq);
+        if piece.piece_type() == PieceType::Pawn {
+            self.pawn_key ^= zobrist::piece_key(piece, sq);
+        }
     }
 
     #[inline(always)]
@@ -203,6 +214,9 @@ impl Position {
         self.occupied.clear(sq);
         self.mailbox[sq.index()] = Piece::NONE;
         self.key ^= zobrist::piece_key(piece, sq);
+        if piece.piece_type() == PieceType::Pawn {
+            self.pawn_key ^= zobrist::piece_key(piece, sq);
+        }
     }
 
     #[inline(always)]
@@ -214,7 +228,11 @@ impl Position {
         self.occupied ^= mask;
         self.mailbox[from.index()] = Piece::NONE;
         self.mailbox[to.index()] = piece.0;
-        self.key ^= zobrist::piece_key(piece, from) ^ zobrist::piece_key(piece, to);
+        let delta = zobrist::piece_key(piece, from) ^ zobrist::piece_key(piece, to);
+        self.key ^= delta;
+        if piece.piece_type() == PieceType::Pawn {
+            self.pawn_key ^= delta;
+        }
     }
 
     // -- make / unmake -------------------------------------------------------
@@ -234,6 +252,7 @@ impl Position {
             ep_square: self.ep_square,
             halfmove: self.halfmove,
             key: self.key,
+            pawn_key: self.pawn_key,
         });
 
         // Clear previous en-passant from the key.
@@ -325,6 +344,12 @@ impl Position {
             self.recompute_key(),
             "zobrist desync after make {mv}"
         );
+        #[cfg(feature = "strict-asserts")]
+        debug_assert_eq!(
+            self.pawn_key,
+            self.recompute_pawn_key(),
+            "pawn zobrist desync after make {mv}"
+        );
     }
 
     /// Undo the most recent [`make_move`].
@@ -382,6 +407,7 @@ impl Position {
         self.ep_square = undo.ep_square;
         self.halfmove = undo.halfmove;
         self.key = undo.key;
+        self.pawn_key = undo.pawn_key;
     }
 
     /// Make a null move (search only — never a real game move).
@@ -392,6 +418,7 @@ impl Position {
             ep_square: self.ep_square,
             halfmove: self.halfmove,
             key: self.key,
+            pawn_key: self.pawn_key,
         });
         if let Some(ep) = self.ep_square {
             self.key ^= zobrist::en_passant_key(ep.file());
@@ -598,6 +625,19 @@ impl Position {
             key ^= zobrist::en_passant_key(ep.file());
         }
         key ^= zobrist::color_key(self.side);
+        key
+    }
+
+    /// Recompute the pawn-only Zobrist key from scratch (asserts/validation).
+    pub fn recompute_pawn_key(&self) -> u64 {
+        let mut key = 0u64;
+        for color in [Color::White, Color::Black] {
+            let mut bb = self.pieces(color, PieceType::Pawn);
+            while bb.any() {
+                let sq = bb.pop_lsb();
+                key ^= zobrist::piece_key(Piece::new(color, PieceType::Pawn), sq);
+            }
+        }
         key
     }
 

@@ -24,6 +24,13 @@ pub const MATE_IN_MAX: i32 = MATE - MAX_PLY as i32;
 
 const NODES_CHECK_MASK: u64 = 2047;
 
+/// Correction-history table size (entries per side, power of two).
+const CORR_SIZE: usize = 16384;
+/// Correction values are stored scaled by this grain.
+const CORR_GRAIN: i32 = 256;
+/// Maximum stored correction: ±32 cp.
+const CORR_MAX: i32 = 32 * CORR_GRAIN;
+
 /// Information reported after each completed iteration.
 pub struct SearchInfo {
     pub depth: u32,
@@ -35,22 +42,34 @@ pub struct SearchInfo {
     pub hashfull: usize,
 }
 
-/// Heuristic tables for move ordering (sized to be reusable across a search).
-struct Heuristics {
+/// Heuristic tables for move ordering. Owned by the search but transferable
+/// across searches (see [`Search::set_heuristics`]) so history persists
+/// between moves of the same game; reset on `ucinewgame`.
+pub struct Heuristics {
     killers: [[Move; 2]; MAX_PLY],
     history: Box<[[[i32; 64]; 64]; 2]>,
     counters: [[Move; 64]; 12],
-    // Continuation history: [prev_piece][prev_to][cur_piece][cur_to].
-    conthist: Box<[[[[i16; 64]; 12]; 64]; 12]>,
+    // Continuation history: [prev_piece][prev_to][cur_piece][cur_to], one
+    // table per ply offset (1 = counter context, 2 = follow-up context).
+    conthist: [Box<[[[[i16; 64]; 12]; 64]; 12]>; 2],
+    // Capture history: [moving_piece][to][captured_piece_type].
+    capthist: Box<[[[i16; 6]; 64]; 12]>,
+    // Static-eval correction by [side][pawn-structure key], in CORR_GRAIN units.
+    corrhist: Box<[[i32; CORR_SIZE]; 2]>,
 }
 
 impl Heuristics {
-    fn new() -> Heuristics {
+    pub fn new() -> Heuristics {
         Heuristics {
             killers: [[Move::NULL; 2]; MAX_PLY],
             history: Box::new([[[0; 64]; 64]; 2]),
             counters: [[Move::NULL; 64]; 12],
-            conthist: Box::new([[[[0; 64]; 12]; 64]; 12]),
+            conthist: [
+                Box::new([[[[0; 64]; 12]; 64]; 12]),
+                Box::new([[[[0; 64]; 12]; 64]; 12]),
+            ],
+            capthist: Box::new([[[0; 6]; 64]; 12]),
+            corrhist: Box::new([[0; CORR_SIZE]; 2]),
         }
     }
 
@@ -58,7 +77,11 @@ impl Heuristics {
         self.killers = [[Move::NULL; 2]; MAX_PLY];
         *self.history = [[[0; 64]; 64]; 2];
         self.counters = [[Move::NULL; 64]; 12];
-        *self.conthist = [[[[0; 64]; 12]; 64]; 12];
+        for t in &mut self.conthist {
+            **t = [[[[0; 64]; 12]; 64]; 12];
+        }
+        *self.capthist = [[[0; 6]; 64]; 12];
+        *self.corrhist = [[0; CORR_SIZE]; 2];
     }
 }
 
@@ -68,6 +91,8 @@ struct Stack {
     eval: i32,
     moved_piece: u8,
     current_move: Move,
+    /// Move excluded at this ply by a singular-extension verification search.
+    excluded: Move,
 }
 
 pub struct Search<'a> {
@@ -80,6 +105,8 @@ pub struct Search<'a> {
     nodes: u64,
     seldepth: u32,
     stopped: bool,
+    /// True if the current iteration's aspiration window failed low at root.
+    iter_fail_low: bool,
 
     heur: Heuristics,
     stack: [Stack; MAX_PLY + 4],
@@ -87,6 +114,10 @@ pub struct Search<'a> {
     pv_len: [usize; MAX_PLY],
 
     lmr: [[i32; 64]; 64],
+
+    /// While non-zero, null moves are disabled below this ply (zugzwang
+    /// verification re-search after a null-move fail-high).
+    nmp_min_ply: i32,
 
     root_best: Move,
     root_score: i32,
@@ -121,15 +152,18 @@ impl<'a> Search<'a> {
             nodes: 0,
             seldepth: 0,
             stopped: false,
+            iter_fail_low: false,
             heur: Heuristics::new(),
             stack: [Stack {
                 eval: 0,
                 moved_piece: 0,
                 current_move: Move::NULL,
+                excluded: Move::NULL,
             }; MAX_PLY + 4],
             pv_table: Box::new([[Move::NULL; MAX_PLY]; MAX_PLY]),
             pv_len: [0; MAX_PLY],
             lmr,
+            nmp_min_ply: 0,
             root_best: Move::NULL,
             root_score: 0,
             on_info: None,
@@ -167,21 +201,40 @@ impl<'a> Search<'a> {
             .unwrap_or(MAX_PLY as u32 - 1)
             .min(MAX_PLY as u32 - 1);
         let mut last_score = 0;
+        let mut stability = 0u32;
 
         for depth in 1..=max_depth {
+            self.iter_fail_low = false;
             let score = self.aspiration(depth as i32, last_score);
             if self.stopped {
                 break;
             }
             last_score = score;
+            let prev_best = best_move;
             best_move = self.pv_table[0][0];
             self.root_best = best_move;
             self.root_score = score;
 
             self.report(depth, score);
 
-            // Soft time and mate-found early exit.
-            if self.tm.soft_expired() {
+            // Soft time (scaled by best-move stability and root fail-lows)
+            // and mate-found early exit.
+            if best_move == prev_best {
+                stability = (stability + 1).min(4);
+            } else {
+                stability = 0;
+            }
+            let mut budget_pct: u64 = match stability {
+                0 => 130,
+                1 => 115,
+                2 => 100,
+                3 => 90,
+                _ => 80,
+            };
+            if self.iter_fail_low {
+                budget_pct += 40;
+            }
+            if self.tm.soft_expired_scaled(budget_pct) {
                 break;
             }
             if score.abs() >= MATE_IN_MAX && depth >= 4 {
@@ -235,6 +288,7 @@ impl<'a> Search<'a> {
                 return score;
             }
             if score <= alpha {
+                self.iter_fail_low = true;
                 beta = (alpha + beta) / 2;
                 alpha = (score - delta).max(-INFINITY);
             } else if score >= beta {
@@ -303,6 +357,11 @@ impl<'a> Search<'a> {
             }
         }
 
+        // Move excluded by a singular verification search at this node; while
+        // set, TT cutoffs/stores and whole-node pruning are disabled because
+        // the searched move set is not the full move set of the position.
+        let excluded = self.stack[ply as usize].excluded;
+
         let key = self.pos.key();
         let tt_hit = self.tt.probe(key);
         let mut tt_move = Move::NULL;
@@ -311,7 +370,7 @@ impl<'a> Search<'a> {
             tt_move = h.mv;
             tt_eval = Some(h.eval);
             let tt_score = score_from_tt(h.score, ply);
-            if !is_pv && h.depth >= depth {
+            if !is_pv && excluded.is_null() && h.depth >= depth {
                 match h.bound {
                     Bound::Exact => return tt_score,
                     Bound::Lower if tt_score >= beta => return tt_score,
@@ -321,18 +380,25 @@ impl<'a> Search<'a> {
             }
         }
 
-        // Static eval (skipped while in check).
-        let static_eval = if in_check {
+        // Static eval (skipped while in check). The TT stores the *raw* eval;
+        // correction history nudges it toward past search results for the
+        // same pawn structure before it feeds any pruning decision.
+        let raw_eval = if in_check {
             -INFINITY
         } else {
             tt_eval.unwrap_or_else(|| eval::evaluate(self.pos))
+        };
+        let static_eval = if in_check {
+            raw_eval
+        } else {
+            (raw_eval + self.correction()).clamp(-MATE_IN_MAX + 1, MATE_IN_MAX - 1)
         };
         self.stack[ply as usize].eval = static_eval;
 
         let improving = !in_check && ply >= 2 && static_eval > self.stack[(ply - 2) as usize].eval;
 
         // Whole-node pruning (non-PV, not in check, no immediate mate threat).
-        if !is_pv && !in_check && beta.abs() < MATE_IN_MAX {
+        if !is_pv && !in_check && excluded.is_null() && beta.abs() < MATE_IN_MAX {
             // Reverse futility / static null move.
             if depth <= 8 && static_eval - 80 * depth >= beta {
                 return static_eval;
@@ -348,6 +414,7 @@ impl<'a> Search<'a> {
             if depth >= 3
                 && static_eval >= beta
                 && self.pos.has_non_pawn_material(self.pos.side_to_move())
+                && (self.nmp_min_ply == 0 || ply >= self.nmp_min_ply)
                 && self.stack[(ply - 1).max(0) as usize].current_move != Move::NULL
             {
                 let r = 3 + depth / 3 + ((static_eval - beta) / 200).min(3);
@@ -359,7 +426,70 @@ impl<'a> Search<'a> {
                     return 0;
                 }
                 if score >= beta {
-                    return if score >= MATE_IN_MAX { beta } else { score };
+                    let score = if score >= MATE_IN_MAX { beta } else { score };
+                    // At high depth, verify the fail-high with a reduced
+                    // null-free search to protect against zugzwang.
+                    if depth < 10 || self.nmp_min_ply != 0 {
+                        return score;
+                    }
+                    self.nmp_min_ply = ply + 3 * (depth - r) / 4;
+                    let v = self.negamax(depth - 1 - r, beta - 1, beta, ply, false);
+                    self.nmp_min_ply = 0;
+                    if self.stopped {
+                        return 0;
+                    }
+                    if v >= beta {
+                        return score;
+                    }
+                }
+            }
+
+            // Probcut: if a shallow search of a strong capture already beats
+            // beta by a safety margin, trust the cutoff at this depth.
+            let probcut_beta = beta + 200;
+            let tt_blocks_probcut = match tt_hit {
+                Some(h) => h.depth >= depth - 3 && score_from_tt(h.score, ply) < probcut_beta,
+                None => false,
+            };
+            if depth >= 6 && !tt_blocks_probcut {
+                let mut clist = MoveList::new();
+                movegen::generate_captures(self.pos, &mut clist);
+                self.score_moves_qs(&mut clist, tt_move);
+                for i in 0..clist.len() {
+                    let m = clist.pick_best(i);
+                    // The capture must be able to lift eval above the bar.
+                    if !see::see_ge(self.pos, m, probcut_beta - static_eval) {
+                        continue;
+                    }
+                    let moving_piece = self.pos.piece_on(m.from()).map(|p| p.0).unwrap_or(0);
+                    self.stack[ply as usize].current_move = m;
+                    self.stack[ply as usize].moved_piece = moving_piece;
+                    self.pos.make_move(m);
+                    let mut s = -self.qsearch(-probcut_beta, -probcut_beta + 1, ply + 1);
+                    if s >= probcut_beta {
+                        s = -self.negamax(
+                            depth - 4,
+                            -probcut_beta,
+                            -probcut_beta + 1,
+                            ply + 1,
+                            false,
+                        );
+                    }
+                    self.pos.unmake_move(m);
+                    if self.stopped {
+                        return 0;
+                    }
+                    if s >= probcut_beta {
+                        self.tt.store(
+                            key,
+                            m,
+                            score_to_tt(s, ply),
+                            raw_eval,
+                            depth - 3,
+                            Bound::Lower,
+                        );
+                        return s;
+                    }
                 }
             }
         }
@@ -388,9 +518,14 @@ impl<'a> Search<'a> {
         let mut move_count = 0i32;
         let mut quiets: [Move; 64] = [Move::NULL; 64];
         let mut quiet_count = 0usize;
+        let mut caps: [Move; 32] = [Move::NULL; 32];
+        let mut cap_count = 0usize;
 
         for i in 0..list.len() {
             let m = list.pick_best(i);
+            if m == excluded {
+                continue;
+            }
             let is_quiet = !m.is_capture() && !m.is_promotion();
             move_count += 1;
 
@@ -415,13 +550,41 @@ impl<'a> Search<'a> {
                 }
             }
 
+            // Singular extension: if the TT move fails high in a reduced
+            // null-window search that *excludes* it, no other move comes
+            // close — extend it. If even the rest of the moves beat beta, the
+            // node is a multi-cut fail-high and we can return early.
+            let mut sing_ext = 0;
+            if !root && depth >= 8 && m == tt_move && excluded.is_null() {
+                if let Some(h) = tt_hit {
+                    let tt_score = score_from_tt(h.score, ply);
+                    if h.depth >= depth - 3
+                        && matches!(h.bound, Bound::Lower | Bound::Exact)
+                        && tt_score.abs() < MATE_IN_MAX
+                    {
+                        let sing_beta = tt_score - 2 * depth;
+                        self.stack[ply as usize].excluded = m;
+                        let s = self.negamax((depth - 1) / 2, sing_beta - 1, sing_beta, ply, false);
+                        self.stack[ply as usize].excluded = Move::NULL;
+                        if self.stopped {
+                            return 0;
+                        }
+                        if s < sing_beta {
+                            sing_ext = 1;
+                        } else if sing_beta >= beta {
+                            return sing_beta;
+                        }
+                    }
+                }
+            }
+
             let moving_piece = self.pos.piece_on(m.from()).map(|p| p.0).unwrap_or(0);
             self.stack[ply as usize].current_move = m;
             self.stack[ply as usize].moved_piece = moving_piece;
 
             self.pos.make_move(m);
             let gives_check = self.pos.in_check();
-            let ext = i32::from(gives_check);
+            let ext = i32::from(gives_check).max(sing_ext);
             let new_depth = depth - 1 + ext;
 
             let score;
@@ -465,6 +628,7 @@ impl<'a> Search<'a> {
                         if is_quiet {
                             self.update_quiet_stats(m, depth, ply, &quiets[..quiet_count]);
                         }
+                        self.update_capture_stats(m, depth, &caps[..cap_count]);
                         break;
                     }
                 }
@@ -473,7 +637,16 @@ impl<'a> Search<'a> {
             if is_quiet && quiet_count < quiets.len() {
                 quiets[quiet_count] = m;
                 quiet_count += 1;
+            } else if m.is_capture() && cap_count < caps.len() {
+                caps[cap_count] = m;
+                cap_count += 1;
             }
+        }
+
+        // With an excluded move, the move set can be empty without it being
+        // mate/stalemate; report a fail-low to the verification search.
+        if move_count == 0 {
+            return alpha;
         }
 
         let bound = if best >= beta {
@@ -483,14 +656,31 @@ impl<'a> Search<'a> {
         } else {
             Bound::Upper
         };
-        self.tt.store(
-            key,
-            best_move,
-            score_to_tt(best, ply),
-            static_eval,
-            depth,
-            bound,
-        );
+
+        // Correction history: learn how far the raw static eval was off for
+        // this pawn structure. Only when the result is usable as an eval
+        // proxy: not in check, not a mate score, quiet (or no) best move, and
+        // the bound does not contradict the direction of the adjustment.
+        if !in_check
+            && excluded.is_null()
+            && best.abs() < MATE_IN_MAX
+            && (best_move.is_null() || (!best_move.is_capture() && !best_move.is_promotion()))
+            && !(bound == Bound::Lower && best <= static_eval)
+            && !(bound == Bound::Upper && best >= static_eval)
+        {
+            self.update_correction(depth, best - raw_eval);
+        }
+
+        if excluded.is_null() {
+            self.tt.store(
+                key,
+                best_move,
+                score_to_tt(best, ply),
+                raw_eval,
+                depth,
+                bound,
+            );
+        }
 
         best
     }
@@ -517,11 +707,34 @@ impl<'a> Search<'a> {
         }
 
         let in_check = self.pos.in_check();
+
+        // TT probe: qsearch entries are stored at depth 0, so any entry
+        // satisfies the depth requirement; reuse score, eval, and move.
+        let key = self.pos.key();
+        let mut tt_move = Move::NULL;
+        let mut tt_eval = None;
+        if let Some(h) = self.tt.probe(key) {
+            tt_move = h.mv;
+            if !in_check {
+                tt_eval = Some(h.eval);
+            }
+            let tt_score = score_from_tt(h.score, ply);
+            match h.bound {
+                Bound::Exact => return tt_score,
+                Bound::Lower if tt_score >= beta => return tt_score,
+                Bound::Upper if tt_score <= alpha => return tt_score,
+                _ => {}
+            }
+        }
+
+        let raw_eval;
         let mut best;
         if in_check {
+            raw_eval = -INFINITY;
             best = -INFINITY;
         } else {
-            best = eval::evaluate(self.pos);
+            raw_eval = tt_eval.unwrap_or_else(|| eval::evaluate(self.pos));
+            best = (raw_eval + self.correction()).clamp(-MATE_IN_MAX + 1, MATE_IN_MAX - 1);
             if best >= beta {
                 return best;
             }
@@ -536,9 +749,10 @@ impl<'a> Search<'a> {
         } else {
             movegen::generate_captures(self.pos, &mut list);
         }
-        self.score_moves_qs(&mut list);
+        self.score_moves_qs(&mut list, tt_move);
 
         let mut any = false;
+        let mut best_move = Move::NULL;
         for i in 0..list.len() {
             let m = list.pick_best(i);
             any = true;
@@ -554,6 +768,7 @@ impl<'a> Search<'a> {
             }
             if score > best {
                 best = score;
+                best_move = m;
                 if score > alpha {
                     alpha = score;
                     self.update_pv(ply, m);
@@ -567,6 +782,14 @@ impl<'a> Search<'a> {
         if in_check && !any {
             return -MATE + ply;
         }
+
+        let bound = if best >= beta {
+            Bound::Lower
+        } else {
+            Bound::Upper
+        };
+        self.tt
+            .store(key, best_move, score_to_tt(best, ply), raw_eval, 0, bound);
         best
     }
 
@@ -592,7 +815,9 @@ impl<'a> Search<'a> {
             let s = if m == tt_move {
                 1 << 24
             } else if m.is_capture() || m.is_promotion() {
-                let mvvlva = self.mvv_lva(m);
+                // Capture history refines MVV-LVA within a victim class (the
+                // /8 keeps it from overriding the victim-value ordering).
+                let mvvlva = self.mvv_lva(m) + self.capture_history(m) / 8;
                 if see::see_ge(self.pos, m, 0) {
                     (1 << 20) + mvvlva
                 } else {
@@ -611,11 +836,13 @@ impl<'a> Search<'a> {
         }
     }
 
-    fn score_moves_qs(&mut self, list: &mut MoveList) {
+    fn score_moves_qs(&mut self, list: &mut MoveList, tt_move: Move) {
         for i in 0..list.len() {
             let m = list.get(i);
-            let s = if m.is_capture() || m.is_promotion() {
-                self.mvv_lva(m)
+            let s = if m == tt_move {
+                1 << 24
+            } else if m.is_capture() || m.is_promotion() {
+                self.mvv_lva(m) + self.capture_history(m) / 8
             } else {
                 0
             };
@@ -648,20 +875,95 @@ impl<'a> Search<'a> {
     #[inline]
     fn quiet_history(&self, stm: Color, ply: i32, m: Move) -> i32 {
         let mut h = self.heur.history[stm.index()][m.from().index()][m.to().index()];
-        if ply >= 1 {
-            let pe = self.stack[(ply - 1) as usize];
-            if !pe.current_move.is_null() {
-                let prev_pt = pe.moved_piece as usize;
-                let prev_to = pe.current_move.to().index();
-                let cur_pt = self
-                    .pos
-                    .piece_on(m.from())
-                    .map(|p| p.0 as usize)
-                    .unwrap_or(0);
-                h += self.heur.conthist[prev_pt][prev_to][cur_pt][m.to().index()] as i32;
+        let cur_pt = self
+            .pos
+            .piece_on(m.from())
+            .map(|p| p.0 as usize)
+            .unwrap_or(0);
+        for (i, off) in [1i32, 2].into_iter().enumerate() {
+            if ply >= off {
+                let pe = self.stack[(ply - off) as usize];
+                if !pe.current_move.is_null() {
+                    let prev_pt = pe.moved_piece as usize;
+                    let prev_to = pe.current_move.to().index();
+                    h += self.heur.conthist[i][prev_pt][prev_to][cur_pt][m.to().index()] as i32;
+                }
             }
         }
         h
+    }
+
+    /// Current static-eval correction (cp) for the side to move, keyed by
+    /// pawn structure.
+    #[inline]
+    fn correction(&self) -> i32 {
+        let stm = self.pos.side_to_move().index();
+        let idx = (self.pos.pawn_key() as usize) & (CORR_SIZE - 1);
+        self.heur.corrhist[stm][idx] / CORR_GRAIN
+    }
+
+    fn update_correction(&mut self, depth: i32, diff: i32) {
+        let stm = self.pos.side_to_move().index();
+        let idx = (self.pos.pawn_key() as usize) & (CORR_SIZE - 1);
+        let e = &mut self.heur.corrhist[stm][idx];
+        let w = (depth + 1).min(16);
+        let v = (*e * (CORR_GRAIN - w) + diff * CORR_GRAIN * w) / CORR_GRAIN;
+        *e = v.clamp(-CORR_MAX, CORR_MAX);
+    }
+
+    /// The captured piece type for capture-history indexing (EP = pawn).
+    #[inline]
+    fn captured_type(&self, m: Move) -> usize {
+        if m.is_en_passant() {
+            PieceType::Pawn.index()
+        } else {
+            self.pos
+                .piece_on(m.to())
+                .map(|p| p.piece_type().index())
+                .unwrap_or(PieceType::Pawn.index())
+        }
+    }
+
+    #[inline]
+    fn capture_history(&self, m: Move) -> i32 {
+        let piece = self
+            .pos
+            .piece_on(m.from())
+            .map(|p| p.index())
+            .unwrap_or(0);
+        self.heur.capthist[piece][m.to().index()][self.captured_type(m)] as i32
+    }
+
+    fn update_capture_stats(&mut self, best: Move, depth: i32, tried: &[Move]) {
+        let bonus = (depth * depth).min(1600);
+        if best.is_capture() {
+            self.update_capture_history(best, bonus);
+        }
+        for &c in tried {
+            if c != best {
+                self.update_capture_history(c, -bonus);
+            }
+        }
+    }
+
+    fn update_capture_history(&mut self, m: Move, bonus: i32) {
+        let piece = self
+            .pos
+            .piece_on(m.from())
+            .map(|p| p.index())
+            .unwrap_or(0);
+        let e = &mut self.heur.capthist[piece][m.to().index()][if m.is_en_passant() {
+            PieceType::Pawn.index()
+        } else {
+            // The board state is pre-move here, so the victim is still on `to`.
+            match self.pos.piece_on(m.to()) {
+                Some(p) => p.piece_type().index(),
+                None => PieceType::Pawn.index(),
+            }
+        }];
+        let cur = *e as i32;
+        let nv = cur + bonus - cur * bonus.abs() / 16384;
+        *e = nv.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
     }
 
     #[inline]
@@ -710,20 +1012,22 @@ impl<'a> Search<'a> {
         let e = &mut self.heur.history[stm.index()][from][to];
         *e += bonus - *e * bonus.abs() / 16384;
 
-        if ply >= 1 {
-            let pe = self.stack[(ply - 1) as usize];
-            if !pe.current_move.is_null() {
-                let prev_pt = pe.moved_piece as usize;
-                let prev_to = pe.current_move.to().index();
-                let cur_pt = self
-                    .pos
-                    .piece_on(m.from())
-                    .map(|p| p.0 as usize)
-                    .unwrap_or(0);
-                let ce = &mut self.heur.conthist[prev_pt][prev_to][cur_pt][to];
-                let cur = *ce as i32;
-                let nv = cur + bonus - cur * bonus.abs() / 16384;
-                *ce = nv.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        let cur_pt = self
+            .pos
+            .piece_on(m.from())
+            .map(|p| p.0 as usize)
+            .unwrap_or(0);
+        for (i, off) in [1i32, 2].into_iter().enumerate() {
+            if ply >= off {
+                let pe = self.stack[(ply - off) as usize];
+                if !pe.current_move.is_null() {
+                    let prev_pt = pe.moved_piece as usize;
+                    let prev_to = pe.current_move.to().index();
+                    let ce = &mut self.heur.conthist[i][prev_pt][prev_to][cur_pt][to];
+                    let cur = *ce as i32;
+                    let nv = cur + bonus - cur * bonus.abs() / 16384;
+                    *ce = nv.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                }
             }
         }
     }
@@ -731,6 +1035,23 @@ impl<'a> Search<'a> {
     /// Reset heuristics between games (`ucinewgame`).
     pub fn clear_heuristics(&mut self) {
         self.heur.clear();
+    }
+
+    /// Adopt heuristic tables carried over from a previous search of the same
+    /// game, so killers/history/counters keep working across moves.
+    pub fn set_heuristics(&mut self, heur: Heuristics) {
+        self.heur = heur;
+    }
+
+    /// Hand the heuristic tables back to the caller for the next search.
+    pub fn take_heuristics(self) -> Heuristics {
+        self.heur
+    }
+}
+
+impl Default for Heuristics {
+    fn default() -> Self {
+        Heuristics::new()
     }
 }
 
