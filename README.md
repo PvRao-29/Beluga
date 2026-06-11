@@ -134,6 +134,20 @@ Match scripts need `cutechess-cli` on `PATH` (see `.local/bin/` or build from [c
 
 Beluga has no built-in board UI. For interactive play and analysis, use [En Croissant](https://github.com/franciscoBSalgueiro/en-croissant):
 
+
+```bash
+./scripts/gui.sh
+```
+
+This builds `target/release/beluga`, downloads En Croissant v0.15.0 into `.local/`, registers Beluga in En Croissant’s engine list, and opens the app. Re-run after rebuilding the engine to refresh the binary path and version.
+
+Options:
+
+```bash
+./scripts/gui.sh --no-build      # skip cargo build
+./scripts/gui.sh --setup-only    # install + register, do not launch
+```
+
 ---
 
 ## Repository layout

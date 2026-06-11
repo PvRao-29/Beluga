@@ -7,6 +7,13 @@
 #   TC=10+0.1 scripts/selfplay.sh ./target/release/beluga engines/Stockfish
 #   TC=60+0.6 scripts/selfplay.sh ./target/release/beluga engines/Tuna 500
 #
+# Opponent UCI options (cutechess option.* syntax):
+#   OPP_UCI_ELO=3000 TC=10+0 scripts/selfplay.sh ./target/release/beluga engines/Stockfish 10
+#   OPP_OPTS="option.Skill Level=10" scripts/selfplay.sh ...
+#
+# Logging: stdout goes to the terminal; tee to games/ if you want a log file:
+#   TC=10+0 OPP_UCI_ELO=3000 scripts/selfplay.sh ... 10 2>&1 | tee games/selfplay_10s.log
+#
 # PGN output: games/YYYY.MM.DD_Beluga - <Opponent>.pgn
 set -euo pipefail
 
@@ -20,6 +27,12 @@ BOOK="${4:-}"
 
 TC="${TC:-8+0.08}"
 CONCURRENCY="${CONCURRENCY:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
+OPP_OPTS="${OPP_OPTS:-}"
+if [[ -n "${OPP_UCI_ELO:-}" ]]; then
+  OPP_OPTS="option.UCI_LimitStrength=true option.UCI_Elo=${OPP_UCI_ELO} ${OPP_OPTS}"
+fi
+
+read -ra OPP_OPT_ARGS <<< "$OPP_OPTS"
 
 OPP_NAME="$(basename "$OPP")"
 OPP_NAME="${OPP_NAME%.*}"
@@ -46,7 +59,7 @@ fi
 
 cutechess-cli \
   -engine name=beluga cmd="$ENGINE" proto=uci \
-  -engine name=opp cmd="$OPP" proto=uci \
+  -engine name=opp cmd="$OPP" proto=uci "${OPP_OPT_ARGS[@]}" \
   -each tc="$TC" \
   -concurrency "$CONCURRENCY" \
   -games 2 -rounds "$((GAMES / 2))" \
