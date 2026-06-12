@@ -6,7 +6,7 @@
 //! loading — together with a validation test that the incremental accumulator
 //! matches a from-scratch refresh.
 //!
-//! Honesty note: **no trained network ships with this repository.** Without a
+//! Note: **no trained network ships with this repository.** Without a
 //! loaded net, [`evaluate`] returns `None` and the engine falls back to the
 //! handcrafted evaluation. The feature indexing here is self-consistent (suitable
 //! for nets trained against *this* layout); it is not byte-compatible with
