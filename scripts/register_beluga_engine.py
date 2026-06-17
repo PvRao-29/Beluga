@@ -7,6 +7,7 @@ import json
 import os
 import platform
 import sys
+import uuid
 from pathlib import Path
 
 
@@ -94,10 +95,36 @@ def beluga_entry(root: Path) -> dict:
     }
 
 
-def merge_engines(engines: list[dict], entry: dict) -> list[dict]:
-    out = [e for e in engines if e.get("id") != ENGINE_ID]
-    out.insert(0, entry)
+def dedupe_engine_ids(engines: list[dict]) -> list[dict]:
+    seen: set[str] = set()
+    out: list[dict] = []
+    for engine in engines:
+        engine_id = engine.get("id")
+        if not engine_id or engine_id in seen:
+            new_id = str(uuid.uuid4())
+            if engine_id in seen:
+                name = engine.get("name", "<unknown>")
+                print(
+                    f"warning: duplicate engine id {engine_id!r} for {name!r}; "
+                    f"assigning {new_id}",
+                    file=sys.stderr,
+                )
+            engine = {**engine, "id": new_id}
+        seen.add(engine["id"])
+        out.append(engine)
     return out
+
+
+def merge_engines(engines: list[dict], entry: dict) -> list[dict]:
+    beluga_path = Path(entry["path"]).resolve()
+    out = [
+        e
+        for e in engines
+        if e.get("id") != ENGINE_ID
+        and Path(e.get("path", "")).resolve() != beluga_path
+    ]
+    out.insert(0, entry)
+    return dedupe_engine_ids(out)
 
 
 def main() -> int:
