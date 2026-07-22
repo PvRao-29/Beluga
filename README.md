@@ -155,6 +155,7 @@ Options:
 ```
 engine-core/     board, movegen, search, eval, tt, see, nnue, timeman
 engine-uci/      beluga binary
+engine-wasm/     WebAssembly bindings for browser play (`wasm-pack build`)
 engine-tune/     Texel K-fit harness
 tools/           perft, bench
 scripts/         testing and match helpers

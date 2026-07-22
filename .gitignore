@@ -35,5 +35,8 @@ scripts/rewrite_history.py
 games/
 engines/
 
+# WASM build output (regenerate with wasm-pack)
+engine-wasm/pkg/
+
 # OS
 .DS_Store

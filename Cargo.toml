@@ -5,6 +5,7 @@ members = [
     "engine-uci",
     "engine-tune",
     "tools",
+    "engine-wasm",
 ]
 
 [workspace.package]

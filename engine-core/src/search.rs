@@ -58,30 +58,53 @@ pub struct Heuristics {
     corrhist: Box<[[i32; CORR_SIZE]; 2]>,
 }
 
+/// Allocate `T` zeroed on the heap without constructing it on the stack.
+/// Required for large history tables — `Box::new([0; N])` blows the WASM stack.
+///
+/// # Safety
+/// The all-zero bit pattern must be a valid `T` (true for our integer / `Move`
+/// tables, where `Move::NULL == Move(0)`).
+unsafe fn box_zeroed<T>() -> Box<T> {
+    let layout = std::alloc::Layout::new::<T>();
+    let ptr = std::alloc::alloc_zeroed(layout);
+    if ptr.is_null() {
+        std::alloc::handle_alloc_error(layout);
+    }
+    Box::from_raw(ptr.cast::<T>())
+}
+
+fn zero_in_place<T>(value: &mut T) {
+    unsafe {
+        std::ptr::write_bytes(
+            (value as *mut T).cast::<u8>(),
+            0,
+            std::mem::size_of::<T>(),
+        );
+    }
+}
+
 impl Heuristics {
     pub fn new() -> Heuristics {
         Heuristics {
             killers: [[Move::NULL; 2]; MAX_PLY],
-            history: Box::new([[[0; 64]; 64]; 2]),
+            // SAFETY: zeroed i32 / i16 / Move tables are valid.
+            history: unsafe { box_zeroed() },
             counters: [[Move::NULL; 64]; 12],
-            conthist: [
-                Box::new([[[[0; 64]; 12]; 64]; 12]),
-                Box::new([[[[0; 64]; 12]; 64]; 12]),
-            ],
-            capthist: Box::new([[[0; 6]; 64]; 12]),
-            corrhist: Box::new([[0; CORR_SIZE]; 2]),
+            conthist: unsafe { [box_zeroed(), box_zeroed()] },
+            capthist: unsafe { box_zeroed() },
+            corrhist: unsafe { box_zeroed() },
         }
     }
 
     fn clear(&mut self) {
         self.killers = [[Move::NULL; 2]; MAX_PLY];
-        *self.history = [[[0; 64]; 64]; 2];
+        zero_in_place(self.history.as_mut());
         self.counters = [[Move::NULL; 64]; 12];
         for t in &mut self.conthist {
-            **t = [[[[0; 64]; 12]; 64]; 12];
+            zero_in_place(t.as_mut());
         }
-        *self.capthist = [[[0; 6]; 64]; 12];
-        *self.corrhist = [[0; CORR_SIZE]; 2];
+        zero_in_place(self.capthist.as_mut());
+        zero_in_place(self.corrhist.as_mut());
     }
 }
 
@@ -165,13 +188,14 @@ impl<'a> Search<'a> {
                 current_move: Move::NULL,
                 excluded: Move::NULL,
             }; MAX_PLY + 4],
-            pv_table: Box::new([[Move::NULL; MAX_PLY]; MAX_PLY]),
+            // SAFETY: Move::NULL is zero; zeroed table is valid.
+            pv_table: unsafe { box_zeroed() },
             pv_len: [0; MAX_PLY],
             lmr,
             nmp_min_ply: 0,
             root_best: Move::NULL,
             root_score: 0,
-            root_nodes: Box::new([[0; 64]; 64]),
+            root_nodes: unsafe { box_zeroed() },
             on_info: None,
         }
     }
