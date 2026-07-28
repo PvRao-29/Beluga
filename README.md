@@ -11,7 +11,9 @@ The search uses iterative deepening PVS with a transposition table, common pruni
 ---
 ## Play
 
-If you would like to play Beluga, please visit my portfolio. You can play a web hosted version of Beluga [here](www.pranshurao.com/arcade/chess)! 
+You can play a web-hosted version of Beluga on my portfolio:
+
+[Play Beluga](https://www.pranshurao.com/arcade/chess)
 
 ---
 
