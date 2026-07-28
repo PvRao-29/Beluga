@@ -9,6 +9,11 @@ Beluga is a bitboard chess engine in a Cargo workspace. The `engine-core` librar
 The search uses iterative deepening PVS with a transposition table, common pruning techniques, and Lazy SMP threading. Evaluation is a tapered handcrafted function built on PeSTO piece-square tables. Weights are not fully tuned yet.
 
 ---
+## Play
+
+If you would like to play Beluga, please visit my portfolio. You can play a web hosted version of Beluga [here](www.pranshurao.com/arcade/chess)! 
+
+---
 
 ## Build
 
